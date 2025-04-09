@@ -6,5 +6,6 @@
     "manifest": "custom_components/gfhanger/manifest.json",
     "type": "integration",   
     "python_dependencies": ["requests"],
-    "repository": "https://github.com/bobbyleu/gofullhanger"
+    "repository": "https://github.com/bobbyleu/gofullhanger",
+    "icon": "icons/GoFullHanger.png"
 }
