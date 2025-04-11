@@ -44,7 +44,7 @@ class GfCover(CoverEntity):
             self._config_data["password"],
             self._config_data["clientid"],
             self._device_info["_id"],
-            2
+            1
         )
 
     async def async_close_cover(self, **kwargs):
@@ -53,7 +53,7 @@ class GfCover(CoverEntity):
             self._config_data["password"],
             self._config_data["clientid"],
             self._device_info["_id"],
-            1
+            2
         )
 
     async def async_stop_cover(self, **kwargs):
