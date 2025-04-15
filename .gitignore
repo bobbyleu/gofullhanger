@@ -12,3 +12,6 @@ logs/
 
 # 忽略备份文件
 bak/
+
+# 忽略 .gitignore 文件
+.gitignore
