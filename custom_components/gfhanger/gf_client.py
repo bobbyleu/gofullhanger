@@ -1,8 +1,11 @@
 import asyncio
 import json
+import logging
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+_LOGGER = logging.getLogger(__name__)
 
 SEQUENCE_NUMBER = 0
-
 
 class GfClient:
     def __init__(self, host, port, max_retries=3):
@@ -10,21 +13,23 @@ class GfClient:
         self.port = port
         self.recv_buffer = b""
         self.login_event = asyncio.Event()
-        self.control_event = asyncio.Event()
         self.last_sent_type = None
         self.response_received = asyncio.Event()
         self.last_operation = None
         self.receive_task = None
-        self.login_successful = False
         self.last_on_home_info = {}
         self.devices_info = []
         self.on_device_status_count = 0
         self.operation_success = False
-        self.has_printed_login_success = False
         self.should_exit = False
         self.max_retries = max_retries
         # 新增变量，用于判断服务器连接是否断开
         self.is_connection_closed = False
+        # # 新增变量，用于记录设备界面操作所发送的百分比值
+        # self.target_position_percentage = None
+        # 操作结束
+        self.operation_ended_event = asyncio.Event()
+
 
     async def connect(self):
         if self.receive_task and not self.receive_task.done():
@@ -89,19 +94,17 @@ class GfClient:
                     self.is_connection_closed = True  # 服务器断开连接，将连接断开标志置为 True
                     break
                 self.recv_buffer += data
-                # self._log_info(f"原始接收: {self.recv_buffer.hex()}")
+                self._log_info(f"原始接收: {self.recv_buffer.hex()}")
                 while len(self.recv_buffer) > 0:
                     if len(self.recv_buffer) < 4:
                         incomplete_message += self.recv_buffer
                         self.recv_buffer = b""
                         break
-
                     data_type_hex = self.recv_buffer[:2].hex()
                     if data_type_hex in ["0100", "0300", "0400"]:
                         if incomplete_message:
                             self.recv_buffer = incomplete_message + self.recv_buffer
                             incomplete_message = b""
-
                         length_hex = self.recv_buffer[2:4].hex()
                         data_length = int(length_hex, 16)
                         total_length = 4 + data_length
@@ -124,7 +127,7 @@ class GfClient:
     def process_complete_message(self, message):
         data_type = message[:2].hex()
         if data_type == "0300":
-            # self._log_info(f"收到 data_type 为 0300 的消息，原始数据: {message.hex()}")
+            self._log_info(f"收到心跳数据，原始数据: {message.hex()}")
             return
 
         length_hex = message[2:4].hex()
@@ -151,15 +154,34 @@ class GfClient:
                     json_str = content_str[start_index:]
                     try:
                         parsed_content = json.loads(json_str)
-                        # if method in ["onHomeInfo", "onLoginInfoEnd", "onDeviceStatusData"]:
-                        #     self._log_info(f"解析成功: {data_type} 消息解析结果 - 方法: {method}, 内容: {parsed_content}")
+                        self._log_info(f"解析成功: {data_type} 消息解析结果 - 方法: {method}, 内容: {parsed_content}")
 
                         if method == "onHomeInfo":
                             self._process_on_home_info(parsed_content)
                         elif method == "onLoginInfoEnd":
                             self._process_on_login_info_end(parsed_content)
                         elif method == "onDeviceStatusData":
-                            self._process_on_device_status_data(parsed_content)
+                            # 当字典中有originUid字段时，跳过不设置设备位置状态
+                            if 'originUid' in parsed_content:
+                                self._log_info(f"原始状态获取成功,直接返回")
+                                return
+
+                            device = parsed_content.get('devices', [])[0]
+                            if device:
+                                e_name = device.get('e_name')
+                                _id = device.get('_id')
+                                status = device.get('props', {}).get('status')
+                                position = device.get('props', {}).get('position')
+
+                                # 当postion值为3或者4时，不设置设备位置状态
+                                if position in ['3', '4']:
+                                    status_msg = "上升中" if position == '3' else "下降中"
+                                    self._log_info(f"{e_name} {status_msg}，位置显示 {position}")
+                                    return
+
+                                if position in ['0', '1', '2']:
+                                    self.operation_ended_event.set()
+                                    self._log_info(f"{e_name} 运行完成，位置显示 {position}")
 
                         if data_type == "0400" and len(message) >= 5 and message[4] == 0x04:
                             self._process_operation_feedback(parsed_content)
@@ -193,8 +215,11 @@ class GfClient:
                                 'e_name': e_name,
                                 '_id': _id,
                                 'status': status,
-                                'position': position
+                                'position': position,
                             })
+        self._log_info(f"设备如下：")
+        self._log_info(f"--{self.devices_info[0]}")
+        self._log_info(f"--{self.devices_info[1]}")
         if not self.devices_info:
             self._log_error("未从 onHomeInfo 中获取到设备信息，关闭连接并退出程序")
             self.close()
@@ -202,33 +227,11 @@ class GfClient:
     def _process_on_login_info_end(self, parsed_content):
         code = parsed_content.get('code')
         if code == 200:
-            if not self.has_printed_login_success:
-                self._log_info("登录成功")
-                self.has_printed_login_success = True
-            self.login_successful = True
+            self._log_info("登录成功")
             self.login_event.set()
         else:
             self._log_error("登录失败")
             self.close()
-
-    def _process_on_device_status_data(self, parsed_content):
-        device = parsed_content.get('devices', [])[0]
-        if device:
-            e_name = device.get('e_name')
-            _id = device.get('_id')
-            status = device.get('props', {}).get('status')
-            position = device.get('props', {}).get('position')
-            self._log_info(f"设备状态 - e_name: {e_name}, _id: {_id}, status: {status}, position: {position}")
-            for i, dev in enumerate(self.devices_info):
-                if dev['_id'] == _id:
-                    self.devices_info[i]['status'] = status
-                    self.devices_info[i]['position'] = position
-                    break
-            if self.last_operation == 'remote_control' and self.operation_success:
-                self.control_event.set()  #此功能会导致不再接收设备操作结果信息，后续再研究如何处理
-                self._log_info("设备操作成功")
-        else:
-            self._log_info("未获取到设备状态更新信息")
 
     def _process_operation_feedback(self, parsed_content):
         if self.is_connection_closed:
@@ -262,10 +265,12 @@ class GfClient:
             return False
         await self.send_message(
             "0100003B7B22737973223A7B2276657273696F6E223A22302E332E30222C2274797065223A22756E6974792D736F636B6574227D2C2275736572223A7B7D7D")
-        await self.response_received.wait()
+        # 限制等待时间为 2 秒
+        await asyncio.wait_for(self.response_received.wait(), timeout=1)
 
         await self.send_message("02000000")
-        await self.response_received.wait()
+        # 限制等待时间为 2 秒
+        await asyncio.wait_for(self.response_received.wait(), timeout=1)
 
         method_name = "connector.userEntryHandler.login"
         login_data = {
@@ -277,17 +282,17 @@ class GfClient:
 
         hex_message = self.generate_hex_message(method_name, login_data)
         await self.send_message(hex_message, operation='login')
-        await self.response_received.wait()
+        await asyncio.wait_for(self.response_received.wait(), timeout=1)
 
         try:
-            await asyncio.wait_for(self.login_event.wait(), timeout=10)
-            return self.login_successful
+            await asyncio.wait_for(self.login_event.wait(), timeout=1)
+            return True
         except asyncio.TimeoutError:
             self._log_error("登录超时，请检查网络或服务器状态。")
             self.close()
             return False
 
-    async def remote_control(self, mobile, password, clientid, deviceId, operation_code, retries=0):
+    async def remote_control(self, mobile, password, clientid, deviceId, operation_code):
         operation_mapping = {
             1: "putDown",
             2: "raiseUp",
@@ -302,9 +307,9 @@ class GfClient:
                 return False
 
         # 重置事件
-        self.control_event.clear()
         self.on_device_status_count = 0
         self.operation_success = False
+        self.operation_ended_event.clear()
 
         method_name = "main.userHandler.remoteControll"
         control_data = {
@@ -314,23 +319,13 @@ class GfClient:
 
         hex_message = self.generate_hex_message(method_name, control_data, is_operation_command=True)
         await self.send_message(hex_message, operation='remote_control')
-
-        try:
-            await asyncio.wait_for(self.control_event.wait(), timeout=10)
-            return True
-        except asyncio.TimeoutError:
-            if retries < self.max_retries:
-                self._log_error(f"操作失败：未收到位置反馈，重试第 {retries + 1} 次")
-                return await self.remote_control(mobile, password, clientid, deviceId, operation_code, retries + 1)
-            else:
-                self._log_error("达到最大重试次数，操作失败")
-                return False
+        return True
 
     def _log_info(self, message):
-        print(f"[注意] {message}")
+        _LOGGER.info(message)
 
     def _log_error(self, message):
-        print(f"[错误] {message}")
+        _LOGGER.error(message)
 
     def _exit_program(self):
         self.should_exit = True

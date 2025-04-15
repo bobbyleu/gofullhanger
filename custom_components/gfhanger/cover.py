@@ -1,4 +1,6 @@
+# cover.py
 import logging
+import asyncio
 from homeassistant.components.cover import (
     CoverEntity,
     CoverEntityFeature,
@@ -6,18 +8,20 @@ from homeassistant.components.cover import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from .gf_client import GfClient
+# from .gf_client import GfClient
 
 _LOGGER = logging.getLogger(__name__)
 
+
 async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry, async_add_entities
+        hass: HomeAssistant, entry: ConfigEntry, async_add_entities
 ):
     client = hass.data[entry.entry_id]["client"]
     entities = []
     for device_info in client.devices_info:
         entities.append(GfCover(device_info, client, entry.data))
     async_add_entities(entities)
+
 
 class GfCover(CoverEntity):
     def __init__(self, device_info, client, config_data):
@@ -27,7 +31,7 @@ class GfCover(CoverEntity):
         self._client = client
         self._config_data = config_data
         self._attr_supported_features = (
-            CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.STOP
+                CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.STOP
         )
 
     @property
