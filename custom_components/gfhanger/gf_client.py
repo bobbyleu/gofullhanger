@@ -1,14 +1,16 @@
 import asyncio
 import json
 import logging
+from homeassistant.core import Event
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 _LOGGER = logging.getLogger(__name__)
 
 SEQUENCE_NUMBER = 0
 
 class GfClient:
-    def __init__(self, host, port, max_retries=3):
+    def __init__(self, host, port, hass, max_retries=3):
+        self.hass = hass
         self.host = host
         self.port = port
         self.recv_buffer = b""
@@ -25,8 +27,6 @@ class GfClient:
         self.max_retries = max_retries
         # 新增变量，用于判断服务器连接是否断开
         self.is_connection_closed = False
-        # # 新增变量，用于记录设备界面操作所发送的百分比值
-        # self.target_position_percentage = None
         # 操作结束
         self.operation_ended_event = asyncio.Event()
 
@@ -119,7 +119,7 @@ class GfClient:
                         self.recv_buffer = self.recv_buffer[1:]
 
             except Exception as e:
-                self._log_error(f"接收消息出错: {str(e)}")
+                self._log_error(f"接收消息出错: {str(e)}，当前 recv_buffer: {self.recv_buffer}")
 
         if incomplete_message and not self.is_connection_closed:
             self.process_complete_message(incomplete_message)
@@ -172,6 +172,16 @@ class GfClient:
                                 _id = device.get('_id')
                                 status = device.get('props', {}).get('status')
                                 position = device.get('props', {}).get('position')
+                                event = Event("gf_device_status_update", {"device_id": _id, "position": position})
+                                self.hass.bus.fire(event.event_type, event.data)
+
+
+                                # 根据 _id 更新 devices_info 中对应设备的 position 值
+                                for dev in self.devices_info:
+                                    if dev.get('_id') == _id:
+                                        dev['position'] = position
+                                        self._log_info(f"更新设备 {e_name} 的位置为 {position}")
+                                        break
 
                                 # 当postion值为3或者4时，不设置设备位置状态
                                 if position in ['3', '4']:

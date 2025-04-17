@@ -14,7 +14,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     if entry.domain != "gfhanger":
         return False
 
-    client = GfClient(HOST, PORT)
+    client = GfClient(HOST, PORT, hass)
 
     mobile = entry.data.get("mobile")
     password = entry.data.get("password")
