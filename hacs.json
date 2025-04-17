@@ -1,7 +1,7 @@
 {
     "name": "GoFull Hanger",
     "display_name": "格峰晾衣架",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "description": "实现格峰晾衣架接入homeassistant",
     "manifest": "custom_components/gfhanger/manifest.json",
     "type": "integration",   
