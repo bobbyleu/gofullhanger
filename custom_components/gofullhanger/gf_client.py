@@ -3,7 +3,6 @@ import json
 import logging
 from homeassistant.core import Event
 
-# logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 _LOGGER = logging.getLogger(__name__)
 
 SEQUENCE_NUMBER = 0
@@ -25,9 +24,7 @@ class GfClient:
         self.operation_success = False
         self.should_exit = False
         self.max_retries = max_retries
-        # 新增变量，用于判断服务器连接是否断开
         self.is_connection_closed = False
-        # 操作结束
         self.operation_ended_event = asyncio.Event()
 
 
@@ -175,23 +172,12 @@ class GfClient:
                                 event = Event("gf_device_status_update", {"device_id": _id, "position": position})
                                 self.hass.bus.fire(event.event_type, event.data)
 
-
                                 # 根据 _id 更新 devices_info 中对应设备的 position 值
                                 for dev in self.devices_info:
                                     if dev.get('_id') == _id:
                                         dev['position'] = position
                                         self._log_info(f"更新设备 {e_name} 的位置为 {position}")
                                         break
-
-                                # 当postion值为3或者4时，不设置设备位置状态
-                                if position in ['3', '4']:
-                                    status_msg = "上升中" if position == '3' else "下降中"
-                                    self._log_info(f"{e_name} {status_msg}，位置显示 {position}")
-                                    return
-
-                                if position in ['0', '1', '2']:
-                                    self.operation_ended_event.set()
-                                    self._log_info(f"{e_name} 运行完成，位置显示 {position}")
 
                         if data_type == "0400" and len(message) >= 5 and message[4] == 0x04:
                             self._process_operation_feedback(parsed_content)

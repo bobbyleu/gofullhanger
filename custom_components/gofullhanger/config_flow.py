@@ -2,7 +2,7 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
 
-class GfHangerConfigFlow(config_entries.ConfigFlow, domain="gfhanger"):
+class GfHangerConfigFlow(config_entries.ConfigFlow, domain="gofullhanger"):
     VERSION = 1
 
     async def async_step_user(self, user_input=None):

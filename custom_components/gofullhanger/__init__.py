@@ -11,7 +11,7 @@ HOST = "main.ortron.cn"
 PORT = 13015
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
-    if entry.domain != "gfhanger":
+    if entry.domain != "gofullhanger":
         return False
 
     client = GfClient(HOST, PORT, hass)

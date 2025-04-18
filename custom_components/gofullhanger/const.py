@@ -1,5 +1,5 @@
 # custom_components/gf_cover/const.py
-DOMAIN = "gf_cover"
+DOMAIN = "gofullhanger"
 
 CONF_MOBILE = "mobile"
 CONF_PASSWORD = "password"
