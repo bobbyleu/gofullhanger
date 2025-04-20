@@ -15,7 +15,6 @@ class GfClient:
         self.recv_buffer = b""
         self.login_event = asyncio.Event()
         self.last_sent_type = None
-        self.response_received = asyncio.Event()
         self.last_operation = None
         self.receive_task = None
         self.last_on_home_info = {}
@@ -26,6 +25,7 @@ class GfClient:
         self.max_retries = max_retries
         self.is_connection_closed = False
         self.operation_ended_event = asyncio.Event()
+        self._futures = {}
 
 
     async def connect(self):
@@ -47,14 +47,19 @@ class GfClient:
         self.is_connection_closed = True  # 连接失败，将连接断开标志置为 True
         return False
 
-    def close(self):
-        if self.receive_task:
-            self.receive_task.cancel()
-        if self.writer:
-            self.writer.close()
-        self._log_info("连接已关闭")
-        self._exit_program()
-        self.is_connection_closed = True  # 关闭连接，将连接断开标志置为 True
+    async def close(self):
+        try:
+            if self.receive_task:
+                self.receive_task.cancel()
+            if self.writer:
+                self.writer.close()
+                await self.writer.wait_closed()  # 等待写入器关闭
+            self._log_info("连接已关闭")
+            self._exit_program()
+            self.is_connection_closed = True  # 关闭连接，将连接断开标志置为 True
+            self.should_exit = True
+        except Exception as e:
+            self._log_error(f"关闭连接时出错: {e}")
 
     async def send_message(self, hex_str, operation=None, retries=0):
         if self.is_connection_closed:
@@ -65,9 +70,13 @@ class GfClient:
             self.writer.write(message_bytes)
             await self.writer.drain()
             self.last_sent_type = hex_str[:4]
-            self.response_received.clear()
             self.last_operation = operation
+            future = asyncio.Future()
+            if self.last_sent_type == '0200':
+                self.last_sent_type = '0300'
+            self._futures[self.last_sent_type] = future
             # self._log_info(f"发送: {hex_str}")
+            return await future
         except ValueError as e:
             self._log_error(f"无效的十六进制消息: {hex_str}")
         except ConnectionError as e:
@@ -90,33 +99,32 @@ class GfClient:
                     self._log_info("服务器断开连接")
                     self.is_connection_closed = True  # 服务器断开连接，将连接断开标志置为 True
                     break
-                self.recv_buffer += data
-                self._log_info(f"原始接收: {self.recv_buffer.hex()}")
-                while len(self.recv_buffer) > 0:
-                    if len(self.recv_buffer) < 4:
-                        incomplete_message += self.recv_buffer
-                        self.recv_buffer = b""
-                        break
-                    data_type_hex = self.recv_buffer[:2].hex()
+                incomplete_message += data
+                self._log_info(f"原始接收: {incomplete_message.hex()}")
+                while len(incomplete_message) > 0:
+                    data_type_hex = incomplete_message[:2].hex()
                     if data_type_hex in ["0100", "0300", "0400"]:
-                        if incomplete_message:
-                            self.recv_buffer = incomplete_message + self.recv_buffer
-                            incomplete_message = b""
-                        length_hex = self.recv_buffer[2:4].hex()
+                        length_hex = incomplete_message[2:4].hex()
                         data_length = int(length_hex, 16)
                         total_length = 4 + data_length
-                        if len(self.recv_buffer) >= total_length:
-                            message = self.recv_buffer[:total_length]
+                        if len(incomplete_message) >= total_length:
+                            message = incomplete_message[:total_length]
                             if not self.is_connection_closed:
                                 self.process_complete_message(message)
-                            self.recv_buffer = self.recv_buffer[total_length:]
-                            self.response_received.set()
+                            # 移除已处理的完整消息
+                            incomplete_message = incomplete_message[total_length:]
+                            if data_type_hex in self._futures:
+                                future = self._futures.pop(data_type_hex)
+                                if not future.done():
+                                    future.set_result(message)
+                        else:
+                            self._log_error(f"数据不完整，当前数据: {incomplete_message}")
+                            break
                     else:
-                        incomplete_message += self.recv_buffer[:1]
-                        self.recv_buffer = self.recv_buffer[1:]
-
+                        # 跳过无效数据
+                        incomplete_message = incomplete_message[1:]
             except Exception as e:
-                self._log_error(f"接收消息出错: {str(e)}，当前 recv_buffer: {self.recv_buffer}")
+                self._log_error(f"接收消息出错: {str(e)}，当前 incomplete_message: {incomplete_message}")
 
         if incomplete_message and not self.is_connection_closed:
             self.process_complete_message(incomplete_message)
@@ -213,9 +221,6 @@ class GfClient:
                                 'status': status,
                                 'position': position,
                             })
-        self._log_info(f"设备如下：")
-        self._log_info(f"--{self.devices_info[0]}")
-        self._log_info(f"--{self.devices_info[1]}")
         if not self.devices_info:
             self._log_error("未从 onHomeInfo 中获取到设备信息，关闭连接并退出程序")
             self.close()
@@ -261,12 +266,8 @@ class GfClient:
             return False
         await self.send_message(
             "0100003B7B22737973223A7B2276657273696F6E223A22302E332E30222C2274797065223A22756E6974792D736F636B6574227D2C2275736572223A7B7D7D")
-        # 限制等待时间为 2 秒
-        await asyncio.wait_for(self.response_received.wait(), timeout=1)
 
         await self.send_message("02000000")
-        # 限制等待时间为 2 秒
-        await asyncio.wait_for(self.response_received.wait(), timeout=1)
 
         method_name = "connector.userEntryHandler.login"
         login_data = {
@@ -278,14 +279,13 @@ class GfClient:
 
         hex_message = self.generate_hex_message(method_name, login_data)
         await self.send_message(hex_message, operation='login')
-        await asyncio.wait_for(self.response_received.wait(), timeout=1)
-
         try:
-            await asyncio.wait_for(self.login_event.wait(), timeout=1)
+            await asyncio.wait_for(self.login_event.wait(), timeout=5)
             return True
         except asyncio.TimeoutError:
             self._log_error("登录超时，请检查网络或服务器状态。")
-            self.close()
+            self.should_exit = True
+            await self.close()
             return False
 
     async def remote_control(self, mobile, password, clientid, deviceId, operation_code):
