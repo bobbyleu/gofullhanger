@@ -118,7 +118,7 @@ class GfClient:
                                 if not future.done():
                                     future.set_result(message)
                         else:
-                            self._log_error(f"数据不完整，当前数据: {incomplete_message}")
+                            self._log_info(f"数据不完整，当前数据: {incomplete_message}")
                             break
                     else:
                         # 跳过无效数据

@@ -32,7 +32,7 @@ class GfHangerConfigFlow(config_entries.ConfigFlow, domain="gofullhanger"):
 
 class GfHangerOptionsFlowHandler(config_entries.OptionsFlow):
     def __init__(self, config_entry):
-        self.config_entry = config_entry
+        self._config_entry = config_entry
 
     async def async_step_init(self, user_input=None):
         if user_input is not None:
@@ -48,8 +48,8 @@ class GfHangerOptionsFlowHandler(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema({
-                vol.Required("mobile", default=self.config_entry.data.get("mobile")): str,
-                vol.Required("password", default=self.config_entry.data.get("password")): str,
-                vol.Required("clientid", default=self.config_entry.data.get("clientid")): str,
+                vol.Required("mobile", default=self._config_entry.data.get("mobile")): str,
+                vol.Required("password", default=self._config_entry.data.get("password")): str,
+                vol.Required("clientid", default=self._config_entry.data.get("clientid")): str,
             }),
         )
