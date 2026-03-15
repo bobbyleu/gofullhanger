@@ -49,15 +49,34 @@ class GfClient:
 
     async def close(self):
         try:
-            if self.receive_task:
+            self.should_exit = True
+            self.is_connection_closed = True
+            
+            # 取消所有未完成的future
+            for future in self._futures.values():
+                if not future.done():
+                    future.set_exception(asyncio.CancelledError("连接关闭"))
+            self._futures.clear()
+            
+            # 取消接收任务
+            if self.receive_task and not self.receive_task.done():
                 self.receive_task.cancel()
-            if self.writer:
-                self.writer.close()
-                await self.writer.wait_closed()  # 等待写入器关闭
+                try:
+                    await asyncio.wait_for(self.receive_task, timeout=1.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+            
+            # 关闭写入器
+            if hasattr(self, 'writer') and self.writer:
+                try:
+                    self.writer.close()
+                    await asyncio.wait_for(self.writer.wait_closed(), timeout=2.0)
+                except (asyncio.TimeoutError, Exception) as e:
+                    self._log_error(f"关闭写入器时出错: {e}")
+            
             self._log_info("连接已关闭")
             self._exit_program()
-            self.is_connection_closed = True  # 关闭连接，将连接断开标志置为 True
-            self.should_exit = True
+            
         except Exception as e:
             self._log_error(f"关闭连接时出错: {e}")
 
@@ -123,8 +142,13 @@ class GfClient:
                     else:
                         # 跳过无效数据
                         incomplete_message = incomplete_message[1:]
+            except asyncio.CancelledError:
+                self._log_info("接收消息任务被取消")
+                break
             except Exception as e:
                 self._log_error(f"接收消息出错: {str(e)}，当前 incomplete_message: {incomplete_message}")
+                # 发生异常时，等待一小段时间再继续，避免快速循环
+                await asyncio.sleep(0.1)
 
         if incomplete_message and not self.is_connection_closed:
             self.process_complete_message(incomplete_message)
@@ -264,27 +288,38 @@ class GfClient:
     async def login(self, mobile, password, clientid):
         if not await self.connect():
             return False
-        await self.send_message(
-            "0100003B7B22737973223A7B2276657273696F6E223A22302E332E30222C2274797065223A22756E6974792D736F636B6574227D2C2275736572223A7B7D7D")
-
-        await self.send_message("02000000")
-
-        method_name = "connector.userEntryHandler.login"
-        login_data = {
-            "mobile": mobile,
-            "password": password,
-            "packageName": "ypr",
-            "clientid": clientid
-        }
-
-        hex_message = self.generate_hex_message(method_name, login_data)
-        await self.send_message(hex_message, operation='login')
+        
         try:
-            await asyncio.wait_for(self.login_event.wait(), timeout=5)
-            return True
-        except asyncio.TimeoutError:
-            self._log_error("登录超时，请检查网络或服务器状态。")
-            self.should_exit = True
+            # 发送初始化消息
+            await self.send_message(
+                "0100003B7B22737973223A7B2276657273696F6E223A22302E332E30222C2274797065223A22756E6974792D736F636B6574227D2C2275736572223A7B7D7D")
+
+            # 发送心跳消息
+            await self.send_message("02000000")
+
+            method_name = "connector.userEntryHandler.login"
+            login_data = {
+                "mobile": mobile,
+                "password": password,
+                "packageName": "ypr",
+                "clientid": clientid
+            }
+
+            hex_message = self.generate_hex_message(method_name, login_data)
+            await self.send_message(hex_message, operation='login')
+            
+            # 增加超时时间到30秒，并添加重试机制
+            try:
+                await asyncio.wait_for(self.login_event.wait(), timeout=30.0)
+                return True
+            except asyncio.TimeoutError:
+                self._log_error("登录超时，请检查网络或服务器状态。")
+                # 不立即退出，而是尝试重新连接
+                await self.close()
+                return False
+                
+        except Exception as e:
+            self._log_error(f"登录过程中发生错误: {e}")
             await self.close()
             return False
 
