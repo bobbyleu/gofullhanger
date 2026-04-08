@@ -1,10 +1,1 @@
-{
-    "name": "GoFull Hanger",
-    "display_name": "格峰晾衣架",
-    "version": "1.0.4",
-    "description": "格峰晾衣架接入homeassistant",
-    "manifest": "custom_components/gofullhanger/manifest.json",
-    "type": "integration",   
-    "python_dependencies": ["requests"],
-    "repository": "https://github.com/bobbyleu/gofullhanger"
-}
+﻿{"name":"gofullhanger","display_name":"格峰晾衣架","version":"1.0.5","description":"格峰晾衣架接入Home Assistant","manifest":"custom_components/gofullhanger/manifest.json","type":"integration","homeassistant":"2023.1.0","repository":"https://github.com/bobbyleu/gofullhanger"}
