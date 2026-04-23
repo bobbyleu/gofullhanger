@@ -3,12 +3,14 @@
   "name": "格峰晾衣架",
   "documentation": "https://github.com/bobbyleu/gofullhanger",
   "requirements": [],
-  "dependencies": [],
+  "dependencies": [
+    "mqtt"
+  ],
   "codeowners": [
     "@bobbyleu"
   ],
-  "version": "1.0.6",
-  "iot_class": "cloud_polling",
+  "version": "2.0",
+  "iot_class": "mqtt",
   "config_flow": true,
   "issue_tracker": "https://github.com/bobbyleu/gofullhanger/issues"
 }

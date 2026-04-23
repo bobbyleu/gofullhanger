@@ -8,7 +8,7 @@ from homeassistant.components.cover import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from .gf_client import GfClient
+from .mqtt_client import MqttClient
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ async def async_setup_entry(
     client = hass.data[entry.entry_id]["client"]
     entities = []
     for device_info in client.devices_info:
-        entities.append(GfCover(hass,device_info, client, entry.data))
+        entities.append(GfCover(hass, device_info, client, entry.data))
     async_add_entities(entities)
 
 
@@ -63,29 +63,20 @@ class GfCover(CoverEntity):
 
     async def async_open_cover(self, **kwargs):
         await self._client.remote_control(
-            self._config_data["mobile"],
-            self._config_data["password"],
-            self._config_data["clientid"],
-            self._device_info["_id"],
-            1
+            deviceId=self._device_info["_id"],
+            operation_code=1
         )
 
     async def async_close_cover(self, **kwargs):
         await self._client.remote_control(
-            self._config_data["mobile"],
-            self._config_data["password"],
-            self._config_data["clientid"],
-            self._device_info["_id"],
-            2
+            deviceId=self._device_info["_id"],
+            operation_code=2
         )
 
     async def async_stop_cover(self, **kwargs):
         await self._client.remote_control(
-            self._config_data["mobile"],
-            self._config_data["password"],
-            self._config_data["clientid"],
-            self._device_info["_id"],
-            3
+            deviceId=self._device_info["_id"],
+            operation_code=3
         )
 
     async def async_update(self):

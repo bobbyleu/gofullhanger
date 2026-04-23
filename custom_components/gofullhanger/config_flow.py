@@ -1,6 +1,13 @@
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
+from .const import (
+    CONF_MQTT_BROKER,
+    CONF_MQTT_PORT,
+    CONF_MQTT_USERNAME,
+    CONF_MQTT_PASSWORD,
+    CONF_MQTT_TOPIC_PREFIX,
+)
 
 class GfHangerConfigFlow(config_entries.ConfigFlow, domain="gofullhanger"):
     VERSION = 1
@@ -8,20 +15,24 @@ class GfHangerConfigFlow(config_entries.ConfigFlow, domain="gofullhanger"):
     async def async_step_user(self, user_input=None):
         if user_input is not None:
             return self.async_create_entry(
-                title="Gf Hanger",
+                title="Gf Hanger MQTT",
                 data={
-                    "mobile": user_input["mobile"],
-                    "password": user_input["password"],
-                    "clientid": user_input["clientid"],
+                    CONF_MQTT_BROKER: user_input[CONF_MQTT_BROKER],
+                    CONF_MQTT_PORT: user_input[CONF_MQTT_PORT],
+                    CONF_MQTT_USERNAME: user_input.get(CONF_MQTT_USERNAME),
+                    CONF_MQTT_PASSWORD: user_input.get(CONF_MQTT_PASSWORD),
+                    CONF_MQTT_TOPIC_PREFIX: user_input.get(CONF_MQTT_TOPIC_PREFIX, "gofullhanger"),
                 },
             )
 
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema({
-                vol.Required("mobile"): str,
-                vol.Required("password"): str,
-                vol.Required("clientid"): str,
+                vol.Required(CONF_MQTT_BROKER): str,
+                vol.Required(CONF_MQTT_PORT, default=1883): int,
+                vol.Optional(CONF_MQTT_USERNAME): str,
+                vol.Optional(CONF_MQTT_PASSWORD): str,
+                vol.Optional(CONF_MQTT_TOPIC_PREFIX, default="gofullhanger"): str,
             }),
         )
 
@@ -39,17 +50,21 @@ class GfHangerOptionsFlowHandler(config_entries.OptionsFlow):
             return self.async_create_entry(
                 title="",
                 data={
-                    "mobile": user_input["mobile"],
-                    "password": user_input["password"],
-                    "clientid": user_input["clientid"],
+                    CONF_MQTT_BROKER: user_input[CONF_MQTT_BROKER],
+                    CONF_MQTT_PORT: user_input[CONF_MQTT_PORT],
+                    CONF_MQTT_USERNAME: user_input.get(CONF_MQTT_USERNAME),
+                    CONF_MQTT_PASSWORD: user_input.get(CONF_MQTT_PASSWORD),
+                    CONF_MQTT_TOPIC_PREFIX: user_input.get(CONF_MQTT_TOPIC_PREFIX, "gofullhanger"),
                 },
             )
 
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema({
-                vol.Required("mobile", default=self._config_entry.data.get("mobile")): str,
-                vol.Required("password", default=self._config_entry.data.get("password")): str,
-                vol.Required("clientid", default=self._config_entry.data.get("clientid")): str,
+                vol.Required(CONF_MQTT_BROKER, default=self._config_entry.data.get(CONF_MQTT_BROKER)): str,
+                vol.Required(CONF_MQTT_PORT, default=self._config_entry.data.get(CONF_MQTT_PORT, 1883)): int,
+                vol.Optional(CONF_MQTT_USERNAME, default=self._config_entry.data.get(CONF_MQTT_USERNAME)): str,
+                vol.Optional(CONF_MQTT_PASSWORD, default=self._config_entry.data.get(CONF_MQTT_PASSWORD)): str,
+                vol.Optional(CONF_MQTT_TOPIC_PREFIX, default=self._config_entry.data.get(CONF_MQTT_TOPIC_PREFIX, "gofullhanger")): str,
             }),
         )
