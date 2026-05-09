@@ -3,7 +3,7 @@
   "name": "gofullhanger",
   "type": "integration",
   "description": "格峰晾衣架接入Home Assistant",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "homeassistant": "2023.1.0",
-  "display_name": "格峰晾衣架"
+  "display_name": "格峰晾衣�?
 }
