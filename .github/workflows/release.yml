@@ -20,8 +20,15 @@ jobs:
         id: generate_notes
         run: |
           VERSION=${{ steps.get_version.outputs.VERSION }}
-          PREV_VERSION=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "v0.0.0")
-          CHANGES=$(git log --pretty=format:"- %s" ${PREV_VERSION}..HEAD)
+          PREV_VERSION=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null)
+          echo "PREV_VERSION=$PREV_VERSION"
+          if [ -z "$PREV_VERSION" ]; then
+            echo "没有找到前一个标签，使用所有提交历史"
+            CHANGES=$(git log --pretty=format:"- %s" -20)
+          else
+            echo "找到前一个标签: $PREV_VERSION"
+            CHANGES=$(git log --pretty=format:"- %s" ${PREV_VERSION}..HEAD)
+          fi
           echo "CHANGES<<EOF" >> $GITHUB_OUTPUT
           echo "## 版本 $VERSION 更新内容" >> $GITHUB_OUTPUT
           echo "" >> $GITHUB_OUTPUT
