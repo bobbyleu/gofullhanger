@@ -22,10 +22,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         _LOGGER.error("配置信息不完整，请检查mobile、password和clientid配置")
         return False
 
-    # 添加重试机制
     max_retries = 3
+    client = None
+    
     for attempt in range(max_retries):
         try:
+            if client is not None:
+                await client.close()
+                client = None
+            
             client = GfClient(HOST, PORT, hass, max_retries=3)
             
             _LOGGER.info(f"尝试连接Gf Hanger服务器 (第{attempt + 1}次尝试)...")
@@ -34,7 +39,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             if not connected:
                 _LOGGER.warning(f"连接失败，将在{2 ** attempt}秒后重试")
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(2 ** attempt)  # 指数退避
+                    await asyncio.sleep(2 ** attempt)
                     continue
                 else:
                     _LOGGER.error("达到最大重试次数，连接失败")
@@ -44,17 +49,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             if not logged_in:
                 _LOGGER.warning(f"登录失败，将在{2 ** attempt}秒后重试")
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(2 ** attempt)  # 指数退避
+                    await asyncio.sleep(2 ** attempt)
                     continue
                 else:
                     _LOGGER.error("达到最大重试次数，登录失败")
                     return False
 
-            # 连接和登录成功
             hass.data.setdefault(entry.entry_id, {})
             hass.data[entry.entry_id]["client"] = client
 
-            # 设置cover平台
             await hass.config_entries.async_forward_entry_setups(entry, ["cover"])
             
             _LOGGER.info("Gf Hanger集成设置成功")

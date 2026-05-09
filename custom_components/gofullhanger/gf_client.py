@@ -14,6 +14,7 @@ class GfClient:
         self.port = port
         self.recv_buffer = b""
         self.login_event = asyncio.Event()
+        self.login_error = None
         self.last_sent_type = None
         self.last_operation = None
         self.receive_task = None
@@ -52,7 +53,10 @@ class GfClient:
             self.should_exit = True
             self.is_connection_closed = True
             
-            # 取消所有未完成的future
+            if not self.login_event.is_set():
+                self.login_error = "连接已关闭"
+                self.login_event.set()
+            
             for future in self._futures.values():
                 if not future.done():
                     future.set_exception(asyncio.CancelledError("连接关闭"))
@@ -266,6 +270,10 @@ class GfClient:
         self._log_info(f"操作反馈信息 - code: {code}, codetxt: {codetxt}")
         self.operation_success = code == 200
         if code != 200:
+            if self.last_operation == 'login':
+                self.login_error = f"登录失败: {codetxt} (code: {code})"
+                self.login_event.set()
+                return
             self._log_error("操作返回码非 200，关闭连接并退出程序")
             self.close()
         elif self.last_operation == 'remote_control' and not self.operation_success:
@@ -289,12 +297,13 @@ class GfClient:
         if not await self.connect():
             return False
         
+        self.login_event.clear()
+        self.login_error = None
+        
         try:
-            # 发送初始化消息
             await self.send_message(
                 "0100003B7B22737973223A7B2276657273696F6E223A22302E332E30222C2274797065223A22756E6974792D736F636B6574227D2C2275736572223A7B7D7D")
 
-            # 发送心跳消息
             await self.send_message("02000000")
 
             method_name = "connector.userEntryHandler.login"
@@ -308,13 +317,14 @@ class GfClient:
             hex_message = self.generate_hex_message(method_name, login_data)
             await self.send_message(hex_message, operation='login')
             
-            # 增加超时时间到30秒，并添加重试机制
             try:
                 await asyncio.wait_for(self.login_event.wait(), timeout=30.0)
+                if self.login_error:
+                    self._log_error(self.login_error)
+                    return False
                 return True
             except asyncio.TimeoutError:
                 self._log_error("登录超时，请检查网络或服务器状态。")
-                # 不立即退出，而是尝试重新连接
                 await self.close()
                 return False
                 
