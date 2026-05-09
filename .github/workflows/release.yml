@@ -20,23 +20,48 @@ jobs:
         id: generate_notes
         run: |
           VERSION=${{ steps.get_version.outputs.VERSION }}
-          PREV_VERSION=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null)
-          echo "PREV_VERSION=$PREV_VERSION"
+          echo "当前版本: $VERSION"
+
+          # 获取所有标签并排序
+          TAGS=$(git tag --sort=-version:refname | grep '^v' | head -20)
+          echo "可用标签:"
+          echo "$TAGS"
+
+          # 查找前一个版本标签
+          PREV_VERSION=""
+          FOUND_CURRENT=false
+          for tag in $TAGS; do
+            if [ "$FOUND_CURRENT" = true ]; then
+              PREV_VERSION=$tag
+              break
+            fi
+            if [ "$tag" = "v$VERSION" ]; then
+              FOUND_CURRENT=true
+            fi
+          done
+
+          echo "前一个版本: $PREV_VERSION"
+
+          # 生成changelog
           if [ -z "$PREV_VERSION" ]; then
-            echo "没有找到前一个标签，使用所有提交历史"
-            CHANGES=$(git log --pretty=format:"- %s" -20)
+            echo "没有找到前一个标签，使用最近10条提交历史"
+            CHANGES=$(git log --pretty=format:"- %s" -10)
           else
             echo "找到前一个标签: $PREV_VERSION"
             CHANGES=$(git log --pretty=format:"- %s" ${PREV_VERSION}..HEAD)
           fi
-          echo "CHANGES<<EOF" >> $GITHUB_OUTPUT
-          echo "## 版本 $VERSION 更新内容" >> $GITHUB_OUTPUT
-          echo "" >> $GITHUB_OUTPUT
-          echo "$CHANGES" >> $GITHUB_OUTPUT
-          echo "" >> $GITHUB_OUTPUT
-          echo "---" >> $GITHUB_OUTPUT
-          echo "*此release由GitHub Actions自动创建*" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+
+          # 写入GITHUB_OUTPUT
+          {
+            echo "CHANGES<<EOF"
+            echo "## 版本 $VERSION 更新内容"
+            echo ""
+            echo "$CHANGES"
+            echo ""
+            echo "---"
+            echo "*此release由GitHub Actions自动创建*"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
