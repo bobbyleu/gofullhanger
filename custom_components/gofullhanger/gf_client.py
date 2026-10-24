@@ -223,11 +223,12 @@ class GfClient:
             except asyncio.CancelledError:
                 raise
             except GfAuthError as err:
-                _LOGGER.error("登录被拒绝: %s", err)
-                if first_attempt:
-                    self._startup_error = err
-                    self._logged_in_event.set()
-                    return
+                # 首次: connect() 会向上抛; 运行中: 账号密码可能已变更,
+                # 不再无限退避重试, 停止客户端让实体转为不可用, 提示用户重新配置
+                _LOGGER.error("登录被拒绝: %s (如账号密码已变更, 请在集成条目上「重新配置」)", err)
+                self._startup_error = err
+                self._logged_in_event.set()
+                return
             except Exception as err:  # noqa: BLE001
                 if first_attempt:
                     self._startup_error = GfClientError(str(err))

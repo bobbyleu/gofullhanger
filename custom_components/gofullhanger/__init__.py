@@ -47,6 +47,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.warning("格峰晾衣架暂时无法连接: %s", err)
         raise ConfigEntryNotReady(str(err)) from err
 
+    if not coordinator.device_list:
+        # onHomeInfo 尚未到达的极端情况: 不转发平台, 让 HA 稍后重试 setup
+        await client.close()
+        raise ConfigEntryNotReady("登录成功但尚未收到设备列表, 稍后自动重试")
+
+    coordinator.entry_id = entry.entry_id
+
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         "client": client,
         "coordinator": coordinator,

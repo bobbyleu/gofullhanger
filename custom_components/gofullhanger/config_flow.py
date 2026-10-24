@@ -6,7 +6,6 @@ import uuid
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.core import callback
 
 from .const import (
     CONF_CLIENTID,
@@ -103,18 +102,3 @@ class GfHangerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
             errors=errors,
         )
-
-    @staticmethod
-    @callback
-    def async_get_options_flow(config_entry):
-        return GfHangerOptionsFlowHandler(config_entry)
-
-
-class GfHangerOptionsFlowHandler:
-    """选项流: 目前仅提供重新配置入口说明。"""
-
-    def __init__(self, config_entry) -> None:
-        self._config_entry = config_entry
-
-    async def async_step_init(self, user_input=None):
-        return self.async_create_entry(title="", data={})

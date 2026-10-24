@@ -44,6 +44,8 @@ class GfDataCoordinator(DataUpdateCoordinator):
         self.client = client
         self.devices: dict[str, dict] = {}
         self.operation_messages: dict[str, str] = {}
+        # 由 __init__.py 在 setup 成功后赋值; 账号下新增设备时用于重载集成
+        self.entry_id: str | None = None
 
         client.add_push_handler(PUSH_HOME_INFO, self._on_home_info)
         client.add_push_handler(PUSH_DEVICE_STATUS, self._on_device_status)
@@ -52,6 +54,8 @@ class GfDataCoordinator(DataUpdateCoordinator):
     # ------------------------------------------------------------------ 推送处理
 
     def _on_home_info(self, body: dict) -> None:
+        had_devices = bool(self.devices)  # 首次推送为初始化流程, 不触发重载
+        new_ids: list[str] = []
         for device in _iter_devices(body or {}):
             if device.get("e_model") != SUPPORTED_MODEL:
                 continue
@@ -59,10 +63,17 @@ class GfDataCoordinator(DataUpdateCoordinator):
             existing = self.devices.get(device_id)
             if existing is None:
                 self.devices[device_id] = device
+                new_ids.append(device_id)
             else:
                 # 保留最新 props, 更新静态信息
                 existing.update(device)
         self._publish()
+        # 运行中账号下新增设备 (如用户在 App 添加第二台) -> 重载集成创建实体
+        if had_devices and new_ids and self.entry_id:
+            _LOGGER.info("账号下新增设备 %s, 重载集成以创建实体", new_ids)
+            self.hass.async_create_task(
+                self.hass.config_entries.async_reload(self.entry_id)
+            )
 
     def _on_device_status(self, body: dict) -> None:
         for device in (body or {}).get("devices", []):
