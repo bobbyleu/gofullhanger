@@ -30,11 +30,10 @@ SUPPORTED_MODEL = "hanger_ypr"  # WiFi 直连晾衣机 (射频版 hanger_sp 等�
 CMD_RAISE_UP = "raiseUp"      # 上升 / 收起
 CMD_PUT_DOWN = "putDown"      # 下降 / 放下
 CMD_STOP = "stop"             # 停止
-CMD_CLOSE = "close"           # 关闭所有功能
+CMD_CLOSE = "close"           # 关闭所有功能 (预留: 当前版本无实体使用)
 CMD_STERILIZE = "sterilize"   # 消毒
 CMD_AIRDRYING = "airdrying"   # 风干
 CMD_DRYING = "drying"         # 烘干
-CMD_LIGHTING = "lighting"     # 照明 (部分机型无此硬件)
 
 # ---- props.position 取值 (实测) ----
 POS_TOP = "0"          # 收起 (最高位)
@@ -44,6 +43,7 @@ POS_ASCENDING = "3"    # 上升中
 POS_DESCENDING = "4"   # 下降中
 
 # ---- 功能开关 (prop key, 名称, 图标) ----
+# 对应实体默认在注册表禁用 (基础型号硬件不支持), 见 switch.py 与 README
 SWITCH_FUNCTIONS = (
     (CMD_STERILIZE, "消毒", "mdi:shield-check"),
     (CMD_AIRDRYING, "风干", "mdi:weather-windy"),

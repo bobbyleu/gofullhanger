@@ -3,6 +3,10 @@
 协议为翻转语义: 每次发送 {"name": <func>, "method": "set", "value": null}
 设备在开/关之间切换, 结果通过 onDeviceStatusData 的 props 反映。
 部分机型 (如仅升降型号) 不支持这些功能, 设备会返回"操作失败"。
+
+这些实体默认在 HA 实体注册表中**禁用** (entity_registry_enabled_default=False):
+基础型号硬件不支持, 默认启用只会在界面上留下"点了没反应"的开关;
+支持这些功能的高端机型, 可在 HA 界面手动启用 (见 README)。
 """
 
 from __future__ import annotations
@@ -43,9 +47,10 @@ async def async_setup_entry(
 
 
 class GfFunctionSwitch(CoordinatorEntity[GfDataCoordinator], SwitchEntity):
-    """晾衣架功能开关。"""
+    """晾衣架功能开关 (默认禁用, 需用户在 HA 界面手动启用)。"""
 
     _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = False
 
     def __init__(
         self,
@@ -61,7 +66,6 @@ class GfFunctionSwitch(CoordinatorEntity[GfDataCoordinator], SwitchEntity):
         self._attr_unique_id = f"{device_id}_{prop_key}"
         self._attr_name = label
         self._attr_icon = icon
-        self._optimistic: bool | None = None
         device = coordinator.get_device(device_id) or {}
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, device_id)},
@@ -80,11 +84,7 @@ class GfFunctionSwitch(CoordinatorEntity[GfDataCoordinator], SwitchEntity):
 
     @property
     def is_on(self) -> bool:
-        value = self._props.get(self._prop_key)
-        if value is None:
-            return bool(self._optimistic)
-        self._optimistic = None
-        return value == "1"
+        return self._props.get(self._prop_key) == "1"
 
     @property
     def available(self) -> bool:
@@ -115,13 +115,11 @@ class GfFunctionSwitch(CoordinatorEntity[GfDataCoordinator], SwitchEntity):
     async def async_turn_on(self, **kwargs) -> None:
         if self.is_on:
             return
-        self._optimistic = True
         await self._toggle()
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs) -> None:
         if not self.is_on:
             return
-        self._optimistic = False
         await self._toggle()
         self.async_write_ha_state()

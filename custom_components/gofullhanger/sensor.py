@@ -1,4 +1,8 @@
-"""晾衣架传感器: WiFi 信号强度 (RSSI)。"""
+"""晾衣架传感器: WiFi 信号强度 (RSSI)。
+
+诊断类信息, 默认在 HA 实体注册表中禁用 (entity_registry_enabled_default=False),
+需要时可在 HA 界面手动启用 (见 README)。
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, MANUFACTURER, SUPPORTED_MODEL
@@ -28,13 +32,14 @@ async def async_setup_entry(
 
 
 class GfRssiSensor(CoordinatorEntity[GfDataCoordinator], SensorEntity):
-    """设备 WiFi 信号强度。"""
+    """设备 WiFi 信号强度 (默认禁用, 需用户在 HA 界面手动启用)。"""
 
     _attr_has_entity_name = True
     _attr_name = "信号强度"
     _attr_device_class = SensorDeviceClass.SIGNAL_STRENGTH
     _attr_native_unit_of_measurement = "dBm"
-    _attr_entity_registry_enabled_default = True
+    _attr_entity_registry_enabled_default = False
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator: GfDataCoordinator, device_id: str) -> None:
         super().__init__(coordinator)
