@@ -1,92 +1,74 @@
-import asyncio
+"""格峰晾衣架 (gofullhanger) Home Assistant 自定义集成。"""
+
+from __future__ import annotations
+
 import logging
-from homeassistant.config_entries import ConfigEntry
+
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigEntryAuthFailed,
+    ConfigEntryNotReady,
+)
 from homeassistant.core import HomeAssistant
-from .gf_client import GfClient
+
+from .const import (
+    CONF_CLIENTID,
+    CONF_MOBILE,
+    CONF_PASSWORD,
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    DOMAIN,
+    PACKAGE_NAME,
+)
+from .coordinator import GfDataCoordinator
+from .gf_client import GfAuthError, GfClient, GfClientError
 
 _LOGGER = logging.getLogger(__name__)
 
-# 假设 host 和 port 在这里硬编码，实际可根据需求调整
-HOST = "main.ortron.cn"
-PORT = 13015
+PLATFORMS = ["cover", "switch", "sensor"]
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
-    if entry.domain != "gofullhanger":
-        return False
 
-    mobile = entry.data.get("mobile")
-    password = entry.data.get("password")
-    clientid = entry.data.get("clientid")
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    mobile = entry.data[CONF_MOBILE]
+    password = entry.data[CONF_PASSWORD]
+    clientid = entry.data.get(CONF_CLIENTID)
 
-    if not all([mobile, password, clientid]):
-        _LOGGER.error("配置信息不完整，请检查mobile、password和clientid配置")
-        return False
+    client = GfClient(DEFAULT_HOST, DEFAULT_PORT, PACKAGE_NAME)
+    coordinator = GfDataCoordinator(hass, client)
 
-    max_retries = 3
-    client = None
-    
-    for attempt in range(max_retries):
-        try:
-            if client is not None:
-                await client.close()
-                client = None
-            
-            client = GfClient(HOST, PORT, hass, max_retries=3)
-            
-            _LOGGER.info(f"尝试连接Gf Hanger服务器 (第{attempt + 1}次尝试)...")
-            
-            connected = await client.connect()
-            if not connected:
-                _LOGGER.warning(f"连接失败，将在{2 ** attempt}秒后重试")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(2 ** attempt)
-                    continue
-                else:
-                    _LOGGER.error("达到最大重试次数，连接失败")
-                    return False
+    try:
+        await client.connect(mobile, password, clientid)
+    except GfAuthError as err:
+        await client.close()
+        _LOGGER.error("格峰晾衣架登录失败: %s", err)
+        raise ConfigEntryAuthFailed(str(err)) from err
+    except (GfClientError, OSError) as err:
+        await client.close()
+        _LOGGER.warning("格峰晾衣架暂时无法连接: %s", err)
+        raise ConfigEntryNotReady(str(err)) from err
 
-            logged_in = await client.login(mobile, password, clientid)
-            if not logged_in:
-                _LOGGER.warning(f"登录失败，将在{2 ** attempt}秒后重试")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(2 ** attempt)
-                    continue
-                else:
-                    _LOGGER.error("达到最大重试次数，登录失败")
-                    return False
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
+        "client": client,
+        "coordinator": coordinator,
+    }
 
-            hass.data.setdefault(entry.entry_id, {})
-            hass.data[entry.entry_id]["client"] = client
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-            await hass.config_entries.async_forward_entry_setups(entry, ["cover"])
-            
-            _LOGGER.info("Gf Hanger集成设置成功")
-            return True
-            
-        except asyncio.TimeoutError:
-            _LOGGER.warning(f"设置超时，将在{2 ** attempt}秒后重试")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(2 ** attempt)
-                continue
-            else:
-                _LOGGER.error("达到最大重试次数，设置超时")
-                return False
-                
-        except Exception as e:
-            _LOGGER.error(f"设置Gf Hanger时出错 (第{attempt + 1}次尝试): {e}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(2 ** attempt)
-                continue
-            else:
-                _LOGGER.error("达到最大重试次数，设置失败")
-                return False
+    # clientid 首次生成后持久化
+    if entry.data.get(CONF_CLIENTID) != client.clientid:
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_CLIENTID: client.clientid}
+        )
 
-    return False
+    _LOGGER.info(
+        "格峰晾衣架集成已启动, 发现 %d 台设备", len(coordinator.device_list)
+    )
+    return True
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, ["cover"])
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        client = hass.data[entry.entry_id]["client"]
-        client.close()
-        hass.data.pop(entry.entry_id)
+        data = hass.data[DOMAIN].pop(entry.entry_id)
+        await data["client"].close()
     return unload_ok

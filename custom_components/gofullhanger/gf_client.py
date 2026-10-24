@@ -1,372 +1,434 @@
+"""格峰 (Ortron) 云端 Pomelo 协议异步客户端。
+
+协议要点 (均经抓包 + 实测验证):
+- TCP 长连接 main.ortron.cn:13015
+- 包格式: [type:1][length:3 大端][body]
+- 握手: type=1, body={"sys":{"version":"0.3.0","type":"unity-socket"},"user":{}}
+  -> 响应 {"code":200,"sys":{"heartbeat":10}}; 随后发送 type=2 (ack, 空 body)
+- 心跳: type=3, 空 body, 每 10 秒一次 (服务端约 30 秒无心跳即断开)
+- 消息 (type=4): [flag][varint id][1字节路由长度][路由][JSON body]
+  flag bit0=路由压缩(0), bits1-3=消息类型 (0请求/1通知/2响应/3推送)
+  响应(type=2)不带路由; 推送(type=3)不带 id
+- 登录: 请求 connector.userEntryHandler.login
+  {mobile, password, packageName:"ypr", clientid} -> 响应带 token
+  之后服务端推送 onLoginInfoStart/onServerTime/onHomeInfo/onDeviceStatusData/onLoginInfoEnd
+- 控制: 请求 main.userHandler.remoteControll
+  {deviceId, props:[{name, method:"set", value:null}]}
+- 状态推送: onDeviceStatusData {devices:[{...props...}]}
+  设备级执行结果: onDeviceOperationMsg {deviceId, msg:"操作失败"}
+
+本模块不依赖 homeassistant, 可独立测试。
+"""
+
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
-from homeassistant.core import Event
+import uuid
 
 _LOGGER = logging.getLogger(__name__)
 
-SEQUENCE_NUMBER = 0
+# 包类型
+PKG_HANDSHAKE = 0x01
+PKG_HANDSHAKE_ACK = 0x02
+PKG_HEARTBEAT = 0x03
+PKG_DATA = 0x04
+PKG_KICK = 0x05
+
+# 消息类型 (flag bits 1-3)
+MSG_REQUEST = 0
+MSG_NOTIFY = 1
+MSG_RESPONSE = 2
+MSG_PUSH = 3
+
+FLAG_ROUTE_COMPRESSED_MASK = 0x01
+FLAG_MSG_TYPE_MASK = 0x0E
+
+HANDSHAKE_SYS = {"version": "0.3.0", "type": "unity-socket"}
+DEFAULT_HEARTBEAT = 10
+DEFAULT_REQUEST_TIMEOUT = 15.0
+DEFAULT_LOGIN_TIMEOUT = 30.0
+MAX_BACKOFF = 60.0
+
+
+class GfClientError(Exception):
+    """客户端通用错误。"""
+
+
+class GfAuthError(GfClientError):
+    """登录被拒绝 (账号或密码错误)。"""
+
+
+class GfConnectionError(GfClientError):
+    """连接未建立或已断开。"""
+
+
+def encode_varint(value: int) -> bytes:
+    """Pomelo 消息 id 使用 LEB128 varint。"""
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            return bytes(out)
+
+
+def decode_varint(data: bytes, pos: int) -> tuple[int, int]:
+    shift = 0
+    value = 0
+    while True:
+        if pos >= len(data):
+            raise GfClientError("truncated varint")
+        byte = data[pos]
+        value |= (byte & 0x7F) << shift
+        pos += 1
+        if not byte & 0x80:
+            return value, pos
+        shift += 7
+
 
 class GfClient:
-    def __init__(self, host, port, hass, max_retries=3):
-        self.hass = hass
+    """与格峰云端保持长连接的异步客户端, 支持自动重连。"""
+
+    def __init__(self, host: str, port: int, package_name: str = "ypr") -> None:
         self.host = host
         self.port = port
-        self.recv_buffer = b""
-        self.login_event = asyncio.Event()
-        self.login_error = None
-        self.last_sent_type = None
-        self.last_operation = None
-        self.receive_task = None
-        self.last_on_home_info = {}
-        self.devices_info = []
-        self.on_device_status_count = 0
-        self.operation_success = False
-        self.should_exit = False
-        self.max_retries = max_retries
-        self.is_connection_closed = False
-        self.operation_ended_event = asyncio.Event()
-        self._futures = {}
+        self.package_name = package_name
+        self.clientid = uuid.uuid4().hex
 
+        self._reader: asyncio.StreamReader | None = None
+        self._writer: asyncio.StreamWriter | None = None
+        self._recv_task: asyncio.Task | None = None
+        self._hb_task: asyncio.Task | None = None
+        self._run_task: asyncio.Task | None = None
 
-    async def connect(self):
-        if self.receive_task and not self.receive_task.done():
-            return True  # 已经连接，直接返回
-        retries = 0
-        while retries < self.max_retries:
-            try:
-                self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
-                self._log_info(f"已连接到服务器 {self.host}:{self.port}")
-                self.receive_task = asyncio.create_task(self.receive_messages())
-                self.is_connection_closed = False  # 连接成功，将连接断开标志置为 False
-                return True
-            except ConnectionError as e:
-                self._log_error(f"连接服务器失败: {e}, 重试第 {retries + 1} 次")
-                retries += 1
-        self._log_error("达到最大重试次数，连接失败")
-        self._exit_program()
-        self.is_connection_closed = True  # 连接失败，将连接断开标志置为 True
-        return False
+        self._should_run = False
+        self._connected = False
+        self._closed = False
+        self._heartbeat_interval = DEFAULT_HEARTBEAT
+        self._next_id = 0
+        self._pending: dict[int, asyncio.Future] = {}
+        self._push_handlers: dict[str, list] = {}
+        self._login_done = asyncio.Event()
+        self._logged_in_event = asyncio.Event()
+        self._startup_error: GfClientError | None = None
+        self._login_data: dict | None = None
+        self._creds: tuple[str, str] | None = None
 
-    async def close(self):
+    # ------------------------------------------------------------------ 公共 API
+
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+    def add_push_handler(self, route: str, handler) -> None:
+        """注册推送处理器: handler(body_dict)。"""
+        self._push_handlers.setdefault(route, []).append(handler)
+
+    async def connect(
+        self,
+        mobile: str,
+        password: str,
+        clientid: str | None = None,
+        timeout: float = DEFAULT_LOGIN_TIMEOUT,
+    ) -> dict:
+        """启动客户端并等待登录完成 (含初始数据推送)。
+
+        失败抛出 GfAuthError (凭据错误) 或 GfClientError (网络/超时)。
+        """
+        if clientid:
+            self.clientid = clientid
+        self._creds = (mobile, password)
+        self._should_run = True
+        self._closed = False
+        self._startup_error = None
+        self._logged_in_event.clear()
+
+        self._run_task = asyncio.create_task(self._run())
         try:
-            self.should_exit = True
-            self.is_connection_closed = True
-            
-            if not self.login_event.is_set():
-                self.login_error = "连接已关闭"
-                self.login_event.set()
-            
-            for future in self._futures.values():
-                if not future.done():
-                    future.set_exception(asyncio.CancelledError("连接关闭"))
-            self._futures.clear()
-            
-            # 取消接收任务
-            if self.receive_task and not self.receive_task.done():
-                self.receive_task.cancel()
-                try:
-                    await asyncio.wait_for(self.receive_task, timeout=1.0)
-                except (asyncio.CancelledError, asyncio.TimeoutError):
-                    pass
-            
-            # 关闭写入器
-            if hasattr(self, 'writer') and self.writer:
-                try:
-                    self.writer.close()
-                    await asyncio.wait_for(self.writer.wait_closed(), timeout=2.0)
-                except (asyncio.TimeoutError, Exception) as e:
-                    self._log_error(f"关闭写入器时出错: {e}")
-            
-            self._log_info("连接已关闭")
-            self._exit_program()
-            
-        except Exception as e:
-            self._log_error(f"关闭连接时出错: {e}")
+            await asyncio.wait_for(self._logged_in_event.wait(), timeout)
+        except asyncio.TimeoutError as err:
+            await self.close()
+            raise GfClientError(f"等待登录超时: {err}") from err
 
-    async def send_message(self, hex_str, operation=None, retries=0):
-        if self.is_connection_closed:
-            if not await self.connect():
-                return
-        try:
-            message_bytes = bytes.fromhex(hex_str)
-            self.writer.write(message_bytes)
-            await self.writer.drain()
-            self.last_sent_type = hex_str[:4]
-            self.last_operation = operation
-            future = asyncio.Future()
-            if self.last_sent_type == '0200':
-                self.last_sent_type = '0300'
-            self._futures[self.last_sent_type] = future
-            # self._log_info(f"发送: {hex_str}")
-            return await future
-        except ValueError as e:
-            self._log_error(f"无效的十六进制消息: {hex_str}")
-        except ConnectionError as e:
-            if retries < self.max_retries:
-                self._log_error(f"发送消息时连接错误: {e}, 尝试重新连接并再次发送")
-                if await self.connect():
-                    await self.send_message(hex_str, operation, retries + 1)
-            else:
-                self._log_error("达到最大重试次数，发送消息失败")
-                self._exit_program()
+        if self._startup_error is not None:
+            error = self._startup_error
+            await self.close()
+            raise error
+        return self._login_data or {}
 
-    async def receive_messages(self):
-        incomplete_message = b""
-        while not self.should_exit:
+    async def close(self) -> None:
+        """停止客户端并关闭连接。"""
+        self._should_run = False
+        self._closed = True
+        if self._run_task and not self._run_task.done():
+            self._run_task.cancel()
             try:
-                if self.is_connection_closed:
-                    break
-                data = await self.reader.read(4096)
-                if not data:
-                    self._log_info("服务器断开连接")
-                    self.is_connection_closed = True  # 服务器断开连接，将连接断开标志置为 True
-                    break
-                incomplete_message += data
-                self._log_info(f"原始接收: {incomplete_message.hex()}")
-                while len(incomplete_message) > 0:
-                    data_type_hex = incomplete_message[:2].hex()
-                    if data_type_hex in ["0100", "0300", "0400"]:
-                        length_hex = incomplete_message[2:4].hex()
-                        data_length = int(length_hex, 16)
-                        total_length = 4 + data_length
-                        if len(incomplete_message) >= total_length:
-                            message = incomplete_message[:total_length]
-                            if not self.is_connection_closed:
-                                self.process_complete_message(message)
-                            # 移除已处理的完整消息
-                            incomplete_message = incomplete_message[total_length:]
-                            if data_type_hex in self._futures:
-                                future = self._futures.pop(data_type_hex)
-                                if not future.done():
-                                    future.set_result(message)
-                        else:
-                            self._log_info(f"数据不完整，当前数据: {incomplete_message}")
-                            break
-                    else:
-                        # 跳过无效数据
-                        incomplete_message = incomplete_message[1:]
+                await self._run_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        await self._teardown_connection()
+        # 唤醒所有等待者
+        for future in list(self._pending.values()):
+            if not future.done():
+                future.set_exception(GfConnectionError("client closed"))
+        self._pending.clear()
+
+    async def request(self, route: str, msg, timeout: float = DEFAULT_REQUEST_TIMEOUT):
+        """发送请求并等待响应, 返回响应 body (已解析 JSON)。"""
+        if not self._connected or self._writer is None:
+            raise GfConnectionError("未连接到服务器")
+        self._next_id += 1
+        mid = self._next_id
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        self._pending[mid] = future
+        try:
+            body = json.dumps(msg, separators=(",", ":")) if msg is not None else ""
+            await self._send(MSG_REQUEST, mid, route, body)
+            return await asyncio.wait_for(future, timeout)
+        finally:
+            self._pending.pop(mid, None)
+
+    async def notify(self, route: str, msg) -> None:
+        """发送通知 (无响应)。"""
+        if not self._connected or self._writer is None:
+            raise GfConnectionError("未连接到服务器")
+        body = json.dumps(msg, separators=(",", ":")) if msg is not None else ""
+        await self._send(MSG_NOTIFY, None, route, body)
+
+    async def remote_control(self, device_id: str, name: str, value=None) -> dict:
+        """发送设备控制指令, 返回云端响应 body。"""
+        return await self.request(
+            "main.userHandler.remoteControll",
+            {"deviceId": device_id, "props": [{"name": name, "method": "set", "value": value}]},
+        )
+
+    # ------------------------------------------------------------------ 连接管理
+
+    async def _run(self) -> None:
+        backoff = 5.0
+        first_attempt = True
+        while self._should_run:
+            try:
+                await self._establish()
+                first_attempt = False
+                backoff = 5.0
+                # 阻塞直到连接断开
+                await self._recv_task
             except asyncio.CancelledError:
-                self._log_info("接收消息任务被取消")
+                raise
+            except GfAuthError as err:
+                _LOGGER.error("登录被拒绝: %s", err)
+                if first_attempt:
+                    self._startup_error = err
+                    self._logged_in_event.set()
+                    return
+            except Exception as err:  # noqa: BLE001
+                if first_attempt:
+                    self._startup_error = GfClientError(str(err))
+                    self._logged_in_event.set()
+                    return
+                _LOGGER.warning("连接断开 (%s), %.0f 秒后重连", err, backoff)
+            finally:
+                self._connected = False
+                await self._teardown_connection()
+
+            if not self._should_run:
                 break
-            except Exception as e:
-                self._log_error(f"接收消息出错: {str(e)}，当前 incomplete_message: {incomplete_message}")
-                # 发生异常时，等待一小段时间再继续，避免快速循环
-                await asyncio.sleep(0.1)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, MAX_BACKOFF)
 
-        if incomplete_message and not self.is_connection_closed:
-            self.process_complete_message(incomplete_message)
+    async def _establish(self) -> None:
+        self._reader, self._writer = await asyncio.open_connection(self.host, self.port)
+        _LOGGER.debug("已连接 %s:%s", self.host, self.port)
 
-    def process_complete_message(self, message):
-        data_type = message[:2].hex()
-        if data_type == "0300":
-            self._log_info(f"收到心跳数据，原始数据: {message.hex()}")
-            return
+        # 握手
+        hs_body = json.dumps(
+            {"sys": HANDSHAKE_SYS, "user": {}}, separators=(",", ":")
+        ).encode()
+        await self._write_package(PKG_HANDSHAKE, hs_body)
+        ptype, body = await self._read_package()
+        if ptype != PKG_HANDSHAKE:
+            raise GfClientError(f"握手指令响应类型异常: {ptype}")
+        info = json.loads(body.decode())
+        if info.get("code") != 200:
+            raise GfClientError(f"握手失败: {info}")
+        self._heartbeat_interval = info.get("sys", {}).get("heartbeat", DEFAULT_HEARTBEAT)
+        await self._write_package(PKG_HANDSHAKE_ACK, b"")
+        self._connected = True  # 登录请求发生在 _establish 内部, 须先置位
+        _LOGGER.debug("握手成功, 心跳间隔 %ss", self._heartbeat_interval)
 
-        length_hex = message[2:4].hex()
-        data_length = 4 + int(length_hex, 16)
-        content = message[4:data_length]
-        if data_type == "0400":
-            content = message[6:data_length]
+        # 启动接收/心跳任务
+        self._recv_task = asyncio.create_task(self._receive_loop())
+        self._hb_task = asyncio.create_task(self._heartbeat_loop())
 
-        try:
-            content_str = content.decode('utf-8')
-            if content_str.strip():
-                index_dict = content_str.find('{')
-                index_list = content_str.find('[')
+        # 登录并等待初始数据
+        self._login_data = await self._login()
+        self._logged_in_event.set()
 
-                if index_dict != -1 or index_list != -1:
-                    if index_dict == -1:
-                        start_index = index_list
-                    elif index_list == -1:
-                        start_index = index_dict
-                    else:
-                        start_index = min(index_dict, index_list)
-
-                    method = content_str[:start_index]
-                    json_str = content_str[start_index:]
-                    try:
-                        parsed_content = json.loads(json_str)
-                        self._log_info(f"解析成功: {data_type} 消息解析结果 - 方法: {method}, 内容: {parsed_content}")
-
-                        if method == "onHomeInfo":
-                            self._process_on_home_info(parsed_content)
-                        elif method == "onLoginInfoEnd":
-                            self._process_on_login_info_end(parsed_content)
-                        elif method == "onDeviceStatusData":
-                            # 当字典中有originUid字段时，跳过不设置设备位置状态
-                            if 'originUid' in parsed_content:
-                                self._log_info(f"原始状态获取成功,直接返回")
-                                return
-
-                            device = parsed_content.get('devices', [])[0]
-                            if device:
-                                e_name = device.get('e_name')
-                                _id = device.get('_id')
-                                status = device.get('props', {}).get('status')
-                                position = device.get('props', {}).get('position')
-                                event = Event("gf_device_status_update", {"device_id": _id, "position": position})
-                                self.hass.bus.fire(event.event_type, event.data)
-
-                                # 根据 _id 更新 devices_info 中对应设备的 position 值
-                                for dev in self.devices_info:
-                                    if dev.get('_id') == _id:
-                                        dev['position'] = position
-                                        self._log_info(f"更新设备 {e_name} 的位置为 {position}")
-                                        break
-
-                        if data_type == "0400" and len(message) >= 5 and message[4] == 0x04:
-                            self._process_operation_feedback(parsed_content)
-
-                    except json.JSONDecodeError:
-                        self._log_error(f"消息内容不是有效的 JSON 格式: {json_str}")
-                else:
-                    self._log_error(f"未找到有效的 JSON 起始标识，内容为: {content_str}")
-            else:
-                self._log_error("接收到的消息内容为空，无法解析")
-        except UnicodeDecodeError:
-            self._log_error(f"消息解码错误: 原始数据: {content.hex()}")
-
-    def _process_on_home_info(self, parsed_content):
-        self.last_on_home_info = parsed_content
-        self.devices_info = []
-        homes = parsed_content.get('homes', [])
-        for home in homes:
-            layers = home.get('layers', [])
-            for layer in layers:
-                home_grids = layer.get('homeGrids', [])
-                for home_grid in home_grids:
-                    devices = home_grid.get('devices', [])
-                    for device in devices:
-                        e_name = device.get('e_name')
-                        _id = device.get('_id')
-                        status = device.get('props', {}).get('status')
-                        position = device.get('props', {}).get('position')
-                        if e_name and _id and status is not None and position is not None:
-                            self.devices_info.append({
-                                'e_name': e_name,
-                                '_id': _id,
-                                'status': status,
-                                'position': position,
-                            })
-        if not self.devices_info:
-            self._log_error("未从 onHomeInfo 中获取到设备信息，关闭连接并退出程序")
-            self.close()
-
-    def _process_on_login_info_end(self, parsed_content):
-        code = parsed_content.get('code')
-        if code == 200:
-            self._log_info("登录成功")
-            self.login_event.set()
-        else:
-            self._log_error("登录失败")
-            self.close()
-
-    def _process_operation_feedback(self, parsed_content):
-        if self.is_connection_closed:
-            return
-        code = parsed_content.get('code')
-        codetxt = parsed_content.get('codetxt')
-        self._log_info(f"操作反馈信息 - code: {code}, codetxt: {codetxt}")
-        self.operation_success = code == 200
-        if code != 200:
-            if self.last_operation == 'login':
-                self.login_error = f"登录失败: {codetxt} (code: {code})"
-                self.login_event.set()
-                return
-            self._log_error("操作返回码非 200，关闭连接并退出程序")
-            self.close()
-        elif self.last_operation == 'remote_control' and not self.operation_success:
-            self._log_info("设备操作失败")
-
-    def generate_hex_message(self, method_name, data, is_operation_command=False):
-        global SEQUENCE_NUMBER
-        SEQUENCE_NUMBER += 1
-        sequence_hex = format(SEQUENCE_NUMBER, '04X')
-
-        method_hex = method_name.encode('utf-8').hex().upper()
-        json_hex = json.dumps(data, separators=(',', ':')).encode('utf-8').hex().upper()
-
-        middle_part = "20" if not is_operation_command else "1F"
-        full_content_hex = sequence_hex + middle_part + method_hex + json_hex
-        length_hex = format(len(full_content_hex) // 2, '04X')
-
-        return f"0400{length_hex}{full_content_hex}"
-
-    async def login(self, mobile, password, clientid):
-        if not await self.connect():
-            return False
-        
-        self.login_event.clear()
-        self.login_error = None
-        
-        try:
-            await self.send_message(
-                "0100003B7B22737973223A7B2276657273696F6E223A22302E332E30222C2274797065223A22756E6974792D736F636B6574227D2C2275736572223A7B7D7D")
-
-            await self.send_message("02000000")
-
-            method_name = "connector.userEntryHandler.login"
-            login_data = {
+    async def _login(self) -> dict:
+        if self._creds is None:
+            raise GfClientError("未提供登录凭据")
+        mobile, password = self._creds
+        self._login_done.clear()
+        resp = await self.request(
+            "connector.userEntryHandler.login",
+            {
                 "mobile": mobile,
                 "password": password,
-                "packageName": "ypr",
-                "clientid": clientid
-            }
+                "packageName": self.package_name,
+                "clientid": self.clientid,
+            },
+            timeout=DEFAULT_LOGIN_TIMEOUT,
+        )
+        if resp.get("code") != 200:
+            codetxt = resp.get("codetxt", "")
+            raise GfAuthError(f"登录失败 (code={resp.get('code')}): {codetxt}")
+        # 等待服务端推送完初始数据 (onLoginInfoEnd)
+        try:
+            await asyncio.wait_for(self._login_done.wait(), timeout=20.0)
+        except asyncio.TimeoutError:
+            _LOGGER.debug("未在时限内收到 onLoginInfoEnd, 继续等待推送")
+        return resp
 
-            hex_message = self.generate_hex_message(method_name, login_data)
-            await self.send_message(hex_message, operation='login')
-            
+    async def _teardown_connection(self) -> None:
+        for task in (self._hb_task, self._recv_task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+        self._hb_task = None
+        self._recv_task = None
+        writer, self._writer = self._writer, None
+        self._reader = None
+        if writer is not None:
             try:
-                await asyncio.wait_for(self.login_event.wait(), timeout=30.0)
-                if self.login_error:
-                    self._log_error(self.login_error)
-                    return False
-                return True
-            except asyncio.TimeoutError:
-                self._log_error("登录超时，请检查网络或服务器状态。")
-                await self.close()
-                return False
-                
-        except Exception as e:
-            self._log_error(f"登录过程中发生错误: {e}")
-            await self.close()
-            return False
+                writer.close()
+                await asyncio.wait_for(writer.wait_closed(), timeout=2.0)
+            except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+                pass
+        # 断开时唤醒所有挂起请求
+        for future in list(self._pending.values()):
+            if not future.done():
+                future.set_exception(GfConnectionError("连接已断开"))
+        self._pending.clear()
 
-    async def remote_control(self, mobile, password, clientid, deviceId, operation_code):
-        operation_mapping = {
-            1: "putDown",
-            2: "raiseUp",
-            3: "stop"
-        }
-        name = operation_mapping.get(operation_code)
+    # ------------------------------------------------------------------ 收发
 
-        # 判断连接是否断开
-        if self.is_connection_closed:
-            self._log_info("连接已断开，尝试重新连接并登录...")
-            if not await self.login(mobile, password, clientid):
-                return False
+    async def _heartbeat_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._heartbeat_interval)
+            if self._writer is None:
+                return
+            try:
+                await self._write_package(PKG_HEARTBEAT, b"")
+            except (ConnectionError, OSError) as err:
+                _LOGGER.debug("心跳发送失败: %s", err)
+                return
 
-        # 重置事件
-        self.on_device_status_count = 0
-        self.operation_success = False
-        self.operation_ended_event.clear()
+    async def _receive_loop(self) -> None:
+        assert self._reader is not None
+        buffer = b""
+        while True:
+            data = await self._reader.read(65536)
+            if not data:
+                raise ConnectionError("服务端关闭了连接")
+            buffer += data
+            while len(buffer) >= 4:
+                ptype = buffer[0]
+                length = int.from_bytes(buffer[1:4], "big")
+                if len(buffer) < 4 + length:
+                    break
+                body = buffer[4 : 4 + length]
+                buffer = buffer[4 + length :]
+                await self._handle_package(ptype, body)
 
-        method_name = "main.userHandler.remoteControll"
-        control_data = {
-            "deviceId": deviceId,
-            "props": [{"name": name, "method": "set", "value": None}]
-        }
+    async def _handle_package(self, ptype: int, body: bytes) -> None:
+        if ptype == PKG_HEARTBEAT:
+            return  # 服务端心跳回应
+        if ptype == PKG_KICK:
+            _LOGGER.warning("服务端踢出会话 (kick), 将重连")
+            raise ConnectionError("kicked by server")
+        if ptype != PKG_DATA:
+            _LOGGER.debug("忽略未知包类型 %d", ptype)
+            return
 
-        hex_message = self.generate_hex_message(method_name, control_data, is_operation_command=True)
-        await self.send_message(hex_message, operation='remote_control')
-        return True
+        if not body:
+            return
+        flag = body[0]
+        msg_type = (flag & FLAG_MSG_TYPE_MASK) >> 1
+        route_compressed = flag & FLAG_ROUTE_COMPRESSED_MASK
+        pos = 1
+        mid = None
+        route = None
 
-    def _log_info(self, message):
-        _LOGGER.info(message)
+        if msg_type in (MSG_REQUEST, MSG_RESPONSE):
+            mid, pos = decode_varint(body, pos)
+        if msg_type in (MSG_REQUEST, MSG_NOTIFY, MSG_PUSH):
+            if route_compressed:
+                pos += 2  # 字典压缩路由, 本服务端未启用
+                route = "<compressed>"
+            else:
+                rlen = body[pos]
+                pos += 1
+                route = body[pos : pos + rlen].decode("utf-8", "replace")
+                pos += rlen
 
-    def _log_error(self, message):
-        _LOGGER.error(message)
+        payload = body[pos:]
+        try:
+            data = json.loads(payload.decode("utf-8")) if payload else None
+        except (ValueError, UnicodeDecodeError):
+            _LOGGER.debug("消息体非 JSON: %r", payload[:120])
+            return
 
-    def _exit_program(self):
-        self.should_exit = True
+        if msg_type == MSG_RESPONSE:
+            future = self._pending.get(mid)
+            if future is not None and not future.done():
+                future.set_result(data)
+            return
+
+        if msg_type == MSG_PUSH and route:
+            if route == "onLoginInfoEnd":
+                self._login_done.set()
+            self._dispatch_push(route, data)
+
+    def _dispatch_push(self, route: str, body) -> None:
+        for handler in self._push_handlers.get(route, []):
+            try:
+                handler(body)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.exception("处理推送 %s 出错: %s", route, err)
+
+    async def _send(self, msg_type: int, mid, route: str, body: str) -> None:
+        flag = (msg_type << 1) & 0xFF  # 路由不压缩
+        parts = bytearray([flag])
+        if msg_type in (MSG_REQUEST, MSG_RESPONSE) and mid is not None:
+            parts += encode_varint(mid)
+        if msg_type in (MSG_REQUEST, MSG_NOTIFY, MSG_PUSH):
+            route_bytes = route.encode("utf-8")
+            parts.append(len(route_bytes))
+            parts += route_bytes
+        parts += body.encode("utf-8")
+        await self._write_package(PKG_DATA, bytes(parts))
+
+    async def _write_package(self, ptype: int, body: bytes) -> None:
+        if self._writer is None:
+            raise GfConnectionError("连接未建立")
+        header = bytes([ptype]) + len(body).to_bytes(3, "big")
+        self._writer.write(header + body)
+        await self._writer.drain()
+
+    async def _read_package(self):
+        assert self._reader is not None
+        header = await self._reader.readexactly(4)
+        ptype = header[0]
+        length = int.from_bytes(header[1:4], "big")
+        body = await self._reader.readexactly(length) if length else b""
+        return ptype, body

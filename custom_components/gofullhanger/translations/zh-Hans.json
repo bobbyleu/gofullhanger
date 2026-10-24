@@ -1,0 +1,31 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "连接格峰晾衣架",
+        "description": "输入格峰 App 的账号和密码。设备需与手机 App 处于同一云端账号。",
+        "data": {
+          "mobile": "手机号",
+          "password": "密码"
+        }
+      },
+      "reconfigure": {
+        "title": "修改账号密码",
+        "description": "更新用于连接格峰云端的账号密码。",
+        "data": {
+          "mobile": "手机号",
+          "password": "密码"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "无法连接到格峰云端，请检查网络后重试",
+      "invalid_auth": "手机号或密码错误",
+      "unknown": "发生未知错误，请查看日志"
+    },
+    "abort": {
+      "already_configured": "该手机号已配置过，请直接编辑现有条目",
+      "reauth_successful": "账号密码已更新"
+    }
+  }
+}
