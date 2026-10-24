@@ -35,12 +35,22 @@ CMD_STERILIZE = "sterilize"   # 消毒
 CMD_AIRDRYING = "airdrying"   # 风干
 CMD_DRYING = "drying"         # 烘干
 
-# ---- props.position 取值 (实测) ----
-POS_TOP = "0"          # 收起 (最高位)
-POS_MID = "1"          # 中位
-POS_BOTTOM = "2"       # 放下 (最低位)
-POS_ASCENDING = "3"    # 上升中
-POS_DESCENDING = "4"   # 下降中
+# ---- props.position 取值 (实测: 一号, 机械模型验证) ----
+# 机器运行停止后反馈三个固定档位, 运动中反馈两个状态
+POS_UPPER_STOP = "0"    # 上升停止位 (下降停止位+上升的常规停止点)
+POS_HIDDEN = "1"        # 隐藏位 (最高, 完全收起; 上升停止位再上升才到位)
+POS_LOWER_STOP = "2"    # 下降停止位 (最低, 完全放下)
+POS_ASCENDING = "3"     # 上升中
+POS_DESCENDING = "4"    # 下降中
+
+# 反馈码 -> 档位名称 (实体属性 position_name 用)
+POSITION_NAMES = {
+    POS_UPPER_STOP: "上升停止位",
+    POS_HIDDEN: "隐藏位",
+    POS_LOWER_STOP: "下降停止位",
+    POS_ASCENDING: "上升中",
+    POS_DESCENDING: "下降中",
+}
 
 # ---- 功能开关 (prop key, 名称, 图标) ----
 # 对应实体默认在注册表禁用 (基础型号硬件不支持), 见 switch.py 与 README

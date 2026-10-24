@@ -7,7 +7,7 @@
   "codeowners": [
     "@bobbyleu"
   ],
-  "version": "2.1.0",
+  "version": "2.2.0",
   "homeassistant": "2024.8.0",
   "iot_class": "cloud_push",
   "config_flow": true,
