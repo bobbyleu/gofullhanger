@@ -69,7 +69,7 @@ class GfCover(CoordinatorEntity[GfDataCoordinator], CoverEntity):
     _attr_supported_features = (
         CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.STOP
     )
-    _attr_name = None  # 设备级实体, 名称即设备名
+    _attr_name = "升降"  # 命名实体: 可单独分配 area, 避免 "has an area but no name" 修复警告
 
     def __init__(self, coordinator: GfDataCoordinator, device: dict) -> None:
         super().__init__(coordinator)
